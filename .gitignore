@@ -1,0 +1,10 @@
+.*
+configure
+*.cache
+*~
+*#
+Makefile
+*.log
+config.status
+VERSION
+*.gpd
