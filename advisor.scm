@@ -9,23 +9,40 @@
    %advice-add!
    advice-remove!
    %advice-remove!
+   advisable->proc
    ))
 (select-module advisor)
 
+;; Class: <advisable>
 (define-class <advisable> ()
-  (;; 元となる手続きもしくは callable
-   [callable :init-keyword :callable]
-   ;; callable の実行の周辺で呼ばれる手続きのリスト。
-   [advices :init-value ()]
+  ([callable :init-keyword :callable]
+   [advices :init-form (make-hash-table 'eq?)]
    ))
 
+;; Function: make-advisable callable
 (define (make-advisable callable)
-  (make <advisable> :callable callable))
+  (let ([advisable (make <advisable> :callable callable)])
+    (dolist (pointcut *pointcuts*)
+      (hash-table-put! (~ advisable 'advices) pointcut ()))
+    advisable))
 
-;; Macro: convert-to-advisable-maybe! callable
-;; callable が <advisable> のインスタンスでなかった場合、等価な((callable args ...) の返す
-;; 値が等しい) <advisable> のインスタンスで callable の束縛を上書きする。
-;; callable が <advisable> のインスタンスであった場合、何もしない。
+;; Variable: *pointcuts*
+;; A list of all pointcuts arranged in a precedence order. See %advice-add! for details.
+(define *pointcuts*
+  '(:override :around :filter-return :filter-args :after :before :before-if))
+
+;; Macro: advice-add! advisable pointcut advice
+;; This macro converts advisable into an equivalent instance of <advisable> when
+;; advisable is not an instance of <advisable>, then it adds advice to advisable.
+;; See %advice-add! for details.
+(define-syntax advice-add!
+  (syntax-rules ()
+    [(_ advisable pointcut advice)
+     (begin
+       (convert-to-advisable-maybe! advisable)
+       (%advice-add! advisable pointcut advice))]
+    ))
+
 (define-syntax convert-to-advisable-maybe!
   (syntax-rules ()
     [(_ callable)
@@ -33,59 +50,118 @@
        (set! callable (make-advisable callable)))]
     ))
 
-;; Macro: advice-add! advisable timing advice
-;; advisable が <advisable> のインスタンスでなければ <advisable> のインスタンスに変換し、
-;; %advice-add! により advice を追加する
-(define-syntax advice-add!
+;; Function: %advice-add! advisable pointcut advice
+;; This function adds advice to advisable. You can specify following values as pointcut.
+;; The meaning of pointcut is as follows:
+;; + :around
+;;     Advice is called before calling advisable. Advice takes arguments orig args ... where
+;;     orig is the rest part of entire function call and args is the original arguments
+;;     passed to advisable. Note that args may be modified by other advices.
+;;     Advisable directly returns the value returned by advice (or that overwitten by other
+;;     advices) so if advice does not call (orig args ...) the call of advisable immediately
+;;     stops and the rest part of entire function call is ignored.
+;; + :before
+;;     Advice is called before calling advisable with the same arguments of advisable
+;;     (possibly overwriten by other advices). The returning value of advice is ignored
+;;     and the next part of entire function call is always executed.
+;; + :after
+;;     Advice is called after calling advisable with the same arguments of advisable.
+;;     The returning value of advice is ignored.
+;; + :override
+;;     Advice overrides the original function of advisable, that is, advice is called with
+;;     the original arguments of advisable and the returning value of advice becomes the
+;;     result of entire function call. Note that both arguments and returning values may
+;;     be overwritten by other advices.
+;; + :filter-args
+;;     Advice is called with the original arguments of advisable and the returning values
+;;     of advice (as multiple values) are passed by the rest part of function call.
+;; + :filter-return
+;;     Advice is called with the returning values of advisable (as multiple values) and
+;;     the returning values of advice becomes the result of entire function call.
+;; + :before-if
+;;     Advice is called with the original arguments of advisable and it determines whether
+;;     the rest part of function call is executed. The rest part is called with the same
+;;     arguments when advice returns true. Otherwise the execution stops and it immediately
+;;     returns #f.
+(define (%advice-add! advisable pointcut advice)
+  (if (memq pointcut *pointcuts*)
+      (hash-table-update! (~ advisable 'advices) pointcut
+                          (lambda (advices) (cons advice advices)))
+      (errorf "invalid pointcut: ~s" pointcut)))
+
+;; Macro: advice-remove! advisable advice :optional pointcut
+;; This macro removes advice from advisable by %advice-remove!. If advisable has no more
+;; advices, then it is converted into an equivalent callable.
+(define-syntax advice-remove!
   (syntax-rules ()
-    [(_ advisable timing advice)
+    [(_ advisable advice pointcut ...)
      (begin
-       (convert-to-advisable-maybe! advisable)
-       (%advice-add! advisable timing advice))]
+       (%advice-remove! advisable advice pointcut ...)
+       (when (advisable-has-no-advice? advisable)
+         (set! advisable (~ advisable 'callable))))]
     ))
 
-;; Function: %advice-add! advisable timing advice
-;; advisable の実行時に、指定した timing で手続き advice を実行する。
-;; advice が受け取る引数、及び返すべき値は timing によって異なる。
-;; timing は以下の値を取ることができる。
-;;   + :around
-;;        advisable の実行前に advice が呼ばれる。 advisable に渡された引数を
-;;        args ... とすると、 advice には引数 advisable args ... が渡される。
-;;        advice が rest-cont を実行しなかった場合、続きの処理は呼ばれない。
-;;        また、 advice の返す値を全体の戻り値とする。
-;;   + :before
-;;        advisable の実行前に、 advisable に渡された引数をそのまま advice に渡す。
-;;        advice の戻り値は捨てられる。
-;;   + :after
-;;        advisable の実行後に、 advisable に渡された引数をそのまま advice に渡す。
-;;        advice の戻り値は捨てられ、 advisable の戻り値が全体の戻り値となる。
-;;   + :override
-;;        advisable の実行前に、 advisable に渡された引数をそのまま advice に渡す。
-;;        advice の戻り値がそのまま返される。
-;;   + :filter-args
-;;        advisable の実行前に、 advisable に渡された引数をそのまま advice に返す。
-;;        advice が(多値として)返した値を advisable の新たな引数にする。
-;;   + :filter-return
-;;        advisable の実行後に、 advisable が(多値として)返した値を引数に advice が呼ばれる。
-;;        advice の戻り値がそのまま返される。
-;;   + :before-if
-;;        advisable の実行前に、 advisable に渡された引数をそのまま advice に渡す。
-;;        advice の戻り値が真の値であった場合、同じ引数で advisable が呼ばれる。
-;;        advice のもどちりが義の値であった場合、 advisable は呼ばれず、即座に #f が返される。
-(define (%advice-add! advisable timing advice)
-  (case timing
-    [(:around :before :after :override :filter-args :filter-return :before-if)
-     (set! (~ advisable 'advices) `((,timing . ,advice) . ,(~ advisable 'advices)))]
-    [else (errorf "invalid timing: ~s" timing)]
-    ))
+(define (advisable-has-no-advice? advisable)
+  (fold-left (lambda (result pointcut)
+               (and result (null? (~ advisable 'advices pointcut))))
+             #t
+             *pointcuts*))
 
-;; Function: make-adviced-function proc timing advice return
-;; proc をラップし、呼び出し時に timing で指定されるタイミングで advice を実行するような
-;; 手続きを返す。
-;; return は強制的にすべての手続きを終了させたい場合に呼ぶ継続。
-;; timing と advice についての詳細は advice-add! を参照。
-(define (make-adviced-function proc timing advice return)
-  (case timing
+;; Function: %advice-remove! advisable advice :optional pointcut
+;; This function removes advice associated with pointcut from advisable. If pointcut is not
+;; specified, then it removes advisable associated with any pointcuts.
+(define (%advice-remove! advisable advice :optional (pointcut #f))
+  (define (remove-from! pointcut)
+    (hash-table-update! (~ advisable 'advices) pointcut
+                        (lambda (advices)
+                          (filter (lambda (a) (not (eq? advice a))) advices))))
+  (if pointcut
+      (if (memq pointcut *pointcuts*)
+          (remove-from! pointcut)
+          (errorf "invalid pointcut: ~s" pointcut))
+      (dolist (pointcut *pointcuts*)
+        (remove-from! pointcut))))
+
+;; Method: object-apply advisable . args
+;; This method calls original callable and all advices in specified pointcuts.
+;; The order of advice calls are as follows:
+;; 1. First, all advices associated with :before-if are called with args. When one of them
+;;    returns false, then execusion stops.
+;; 2. Then, all advices associated with :before are called with args.
+;; 3. Then,  all advices associated with :filter-args are called. Args is passed to the first
+;;    advice of them and the returning values of it is passed to the second advice, and so on.
+;;    The returning values of the last advice is passed to the rest of function call.
+;; 4. Then, all advices associated with :around is called. The first advice of them is called
+;;    with the rest part of execusion and the returning value of the last advice associated
+;;    with :filter-args. If an advice does not call the rest part, then the rest advices
+;;    associated with :around or :override and the original function of advisable is ignored
+;;    and the executing process immediately jumps to step 6.
+;; 5. Then, an advice associated with :override is called if exists. Otherwise the original
+;;    function of advisable is called. When there are more than one advices associated with
+;;    :override, only the last one is called.
+;; 6. Then, all advices associated with :filter-return is called. The first advice is called
+;;    with the returning value (as multiple values) of an advice associated with :override
+;;    or the original function of advisable. Similarly, the n-th advice is called with the
+;;    returning values of the (n-1)-th advice. The returning value of the last advice is the
+;;    result of entire executing process.
+;; 7. Finally, all advices associated with :before is called with *the original argument*.
+;;    Note that they are always called unless advices associated with :before-if return false.
+(define-method object-apply ([advisable <advisable>] . args)
+  (apply (advisable->proc advisable) args))
+
+;; Function: advisable->proc advisable
+;; Converts advisable into equivalent procedure.
+(define (advisable->proc advisable)
+  (fold-left (lambda (proc pointcut)
+               (fold-left (lambda (proc advice)
+                            (make-adviced-function proc pointcut advice))
+                          proc
+                          (reverse (~ advisable 'advices pointcut))))
+             (~ advisable 'callable)
+             *pointcuts*))
+
+(define (make-adviced-function proc pointcut advice)
+  (case pointcut
     [(:around) (lambda args
                  (apply advice proc args))]
     [(:before) (lambda args
@@ -103,41 +179,6 @@
     [(:before-if) (lambda args
                     (if (apply advice args)
                         (apply proc args)
-                        (return #f)))]
-    [else (errorf "invalid timing: ~s" timing)]
-    ))
-
-;; Macro: advice-remove! advisable advice
-;; %advice-remove! を用い、 advisable から advice を削除する。
-;; advisable に一つも advice が残らなかった場合、 advisable をその callable で置き換える。
-(define-syntax advice-remove!
-  (syntax-rules ()
-    [(_ advisable advice)
-     (begin
-       (%advice-remove! advisable advice)
-       (when (null? (~ advisable 'advices))
-         (set! advisable (~ advisable 'callable))))]
-    ))
-
-;; Function: %advice-remove! advisable advice
-;; advisable から advice と eq? の意味で等しい advice をすべて削除する。
-;; 等しい advice が存在しない場合は何もしない。
-(define (%advice-remove! advisable advice)
-  (set! (~ advisable 'advices)
-        (filter (lambda (timing-and-advice)
-                  (not (eq? advice (cdr timing-and-advice))))
-                (~ advisable 'advices))))
-
-;; Method: object-apply advisable . args
-(define-method object-apply ([advisable <advisable>] . args)
-  (let/cc return
-    (define proc
-      (let loop ([rest-cont (~ advisable 'callable)]
-                 [advices (~ advisable 'advices)])
-        (match advices
-          [() rest-cont]
-          [((timing . advice) . rest)
-           (loop (make-adviced-function rest-cont timing advice return) rest)])
-        ))
-    (apply proc args)
+                        #f))]
+    [else (errorf "invalid pointcut: ~s" pointcut)]
     ))
