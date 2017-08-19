@@ -1,3 +1,3 @@
-# gauche-advisable
+# gauche-advisor
 
 

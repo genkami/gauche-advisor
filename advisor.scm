@@ -144,7 +144,7 @@
 ;;    or the original function of advisable. Similarly, the n-th advice is called with the
 ;;    returning values of the (n-1)-th advice. The returning value of the last advice is the
 ;;    result of entire executing process.
-;; 7. Finally, all advices associated with :before is called with *the original argument*.
+;; 7. Finally, all advices associated with :after is called with *the original argument*.
 ;;    Note that they are always called unless advices associated with :before-if return false.
 (define-method object-apply ([advisable <advisable>] . args)
   (apply (advisable->proc advisable) args))
